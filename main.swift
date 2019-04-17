@@ -19,7 +19,7 @@ let np = Python.import("numpy")
 let plt = Python.import("matplotlib.pyplot")
 let sns = Python.import("seaborn")
 
-// sns.set()
+
 
 
 
