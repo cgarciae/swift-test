@@ -3,6 +3,8 @@ channels:
   - plotly
 dependencies:
   - python=3.6
-  - tensorflow-gpu=1.11.0
   - matplotlib
   - seaborn
+  - numpy
+  - pip:
+    - tensorflow-gpu==1.13.1

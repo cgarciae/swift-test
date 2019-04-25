@@ -4,8 +4,9 @@ import TensorFlow
 
 enum Slice : Equatable {
     case slice(Int, Int)
+    case at(Int)
     case from(Int)
-    case to(Int)
+    case upto(Int)
     case all
     case rest
 
@@ -17,9 +18,12 @@ enum Slice : Equatable {
             case .slice(let _low, let _high):
                 low = _low
                 high = _high
+            case .at(let value):
+                low = value
+                high = value + 1
             case .from(let _low):
                 low = _low
-            case .to(let _high):
+            case .upto(let _high):
                 high = _high
             default:
                 break 
@@ -34,24 +38,25 @@ enum Slice : Equatable {
             high += n
         }
 
+
         return (low, high)
     }
 }
 
-enum SliceError : Error {
-    case MultipleRest
-    case TooManySlices
-}
+// enum SliceError : Error {
+//     case MultipleRest
+//     case TooManySlices
+// }
 
 extension Tensor {
 
-    func slice(_ slices: Slice...) throws -> Tensor {
+    subscript(_ slices: Slice...) -> Tensor  {
         var slices = slices
         let ndim = Int(self.shape.count)
 
-        if slices.count > ndim {
-            throw SliceError.TooManySlices
-        }
+        // if slices.count > ndim {
+        //     throw SliceError.TooManySlices
+        // }
 
         if slices.count < ndim && !slices.contains(.rest) {
             slices.append(.rest)
@@ -61,9 +66,9 @@ extension Tensor {
         let notRestCount = slices.count - restCount
         let restExpand = ndim - notRestCount
 
-        if restCount > 1 {
-            throw SliceError.MultipleRest
-        }
+        // if restCount > 1 {
+        //     throw SliceError.MultipleRest
+        // }
 
         if restExpand > 0 {
             let allSlices = Array(repeating: Slice.all, count: restExpand)
@@ -76,22 +81,42 @@ extension Tensor {
         var upperBounds: [Int32] = []
 
         for (slice, n) in zip(slices, self.shape.dimensions) {
-            let (lower, higher) = slice.get_range(Int(n))
+            var (lower, upper) = slice.get_range(Int(n))
+            
+            if lower < 0 {
+                lower = 0
+            }
+
+            if upper > n {
+                upper = Int(n)
+            }
+            
             lowerBounds.append(Int32(lower))
-            upperBounds.append(Int32(higher))
+            upperBounds.append(Int32(upper))
         }
 
-        print(lowerBounds)
-        print(upperBounds)
+        let squeezeDims = slices.enumerated()
+            .filter { 
+                if case .at(_) = $1 { return true } 
+                else { return false } 
+            }
+            .map { $0.0 }
+            .reversed()
+        
+        var output = self.slice(lowerBounds: lowerBounds, upperBounds: upperBounds)
 
-        return self.slice(lowerBounds: lowerBounds, upperBounds: upperBounds)
+        for i in squeezeDims {
+            output = output.squeezingShape(at: Int32(i))
+        }
+
+        return output
     }
 }
 
 
 var x = Tensor<Float>(repeating: 0, shape: [10, 6, 4, 5, 8])
 
-x = try x.slice(.to(4), .all, .slice(3, 5), .all, .all)
+x = x[.upto(-2), .at(1), .slice(2, 4), .all, .all]
 
 print(x.shape)
 

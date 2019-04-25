@@ -12,16 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import Foundation
 import TensorFlow
 import Python
 
-
 let np = Python.import("numpy")
 let plt = Python.import("matplotlib.pyplot")
-let sns = Python.import("seaborn")
-
 
 /// Reads a file into an array of bytes.
+// func readFile(_ filename: String) -> [UInt8] {
+//     let possibleFolders = [".", "MNIST"]
+//     for folder in possibleFolders {
+//         let parent = URL(fileURLWithPath: folder)
+//         let filePath = parent.appendingPathComponent(filename).path
+//         guard FileManager.default.fileExists(atPath: filePath) else {
+//             continue
+//         }
+//         let d = Python.open(filePath, "rb").read()
+//         return Array(numpy: np.frombuffer(d, dtype: np.uint8))!
+//     }
+//     fatalError(
+//         "Failed to find file with name \(filename) in the following folders: \(possibleFolders).")
+// }
+
 func readFile(_ filename: String) -> [UInt8] {
     let d = Python.open(filename, "rb").read()
     return Array(numpy: np.frombuffer(d, dtype: np.uint8))!
@@ -34,83 +47,97 @@ func readMNIST(imagesFile: String, labelsFile: String) -> (images: Tensor<Float>
     let images = readFile(imagesFile).dropFirst(16).map { Float($0) }
     let labels = readFile(labelsFile).dropFirst(8).map { Int32($0) }
     let rowCount = labels.count
-    let columnCount = images.count / rowCount
+    let imageHeight = 28, imageWidth = 28
 
     print("Constructing data tensors.")
     return (
-        images: Tensor(shape: [rowCount, columnCount], scalars: images) / 255,
+        images: Tensor(shape: [rowCount, 1, imageHeight, imageWidth], scalars: images)
+            .transposed(withPermutations: [0, 2, 3, 1]) / 255, // NHWC
         labels: Tensor(labels)
     )
 }
 
-
-// Ported from github.com/keras-team/keras/blob/master/examples/cifar10_cnn.py
-struct AllCNN: Layer {
+/// A classifier.
+struct GlobalAvgPooling2D : Layer {
     
-        var conv1 = Conv2D<Float>(filterShape: (3, 3, 1, 32), strides: (2, 2), padding: .same, activation: relu)
-        var bn1 = BatchNorm<Float>(featureCount: 32)
-        var conv2 = Conv2D<Float>(filterShape: (3, 3, 32, 64), activation: relu)
-        var bn2 = BatchNorm<Float>(featureCount: 64)
-        var conv3 = Conv2D<Float>(filterShape: (3, 3, 32, 128), activation: relu)
-        var bn3 = BatchNorm<Float>(featureCount: 128)
-        var conv4 = Conv2D<Float>(filterShape: (3, 3, 128, 10))
-        var gap = GlobalAvgPool2D<Float>()
-    
-
-    @differentiable(wrt: (self, input))
+    @differentiable
     func call(_ input: Tensor<Float>) -> Tensor<Float> {
+        // print("endIndex", input.shape.endIndex, input.shape)
+        let lastDim = input.shape[input.shape.endIndex - 1]
+
 
         return input
-            .sequenced(through: conv1, bn1, conv2, bn2)
-            .sequenced(through: conv3, bn3, conv4, gap)
+            .mean(alongAxes: [1, 2])
+            .reshaped(toShape: Tensor<Int32>([-1, Int32(lastDim)]))
     }
 }
 
+/// A classifier.
+struct Classifier: Layer {
+
+    var conv1 = Conv2D<Float>(filterShape: (3, 3, 1, 32), strides: (2, 2), padding: .same, activation: relu)
+    var bn1 = BatchNorm<Float>(featureCount: 32)
+    var conv2 = Conv2D<Float>(filterShape: (3, 3, 32, 64), activation: relu)
+    var bn2 = BatchNorm<Float>(featureCount: 64)
+    // var conv3 = Conv2D<Float>(filterShape: (3, 3, 32, 128), activation: relu)
+    // var bn3 = BatchNorm<Float>(featureCount: 128)
+    var conv4 = Conv2D<Float>(filterShape: (3, 3, 64, 10))
+    var gap = GlobalAvgPooling2D()
+
+    @differentiable
+    func call(_ input: Tensor<Float>) -> Tensor<Float> {
+        var net = input
+
+        net = conv1(net)
+        net = bn1(net)
+        net = conv2(net)
+        net = bn2(net)
+        // net = conv3(net)
+        // net = bn3(net)
+        net = conv4(net)
+        net = gap(net)
+
+
+        return net
+    }
+}
+
+let epochCount = 12
+let batchSize = 100
 let metric_steps = 100
-let epochCount = 100
-let batchSize = 20
 
 func minibatch<Scalar>(in x: Tensor<Scalar>, at index: Int) -> Tensor<Scalar> {
     let start = index * batchSize
     return x[start..<start+batchSize]
 }
 
-print("Before Init")
-
-var classifier = AllCNN()
-
-print("After Init")
-
 let (images, numericLabels) = readMNIST(imagesFile: "data/train-images-idx3-ubyte",
                                         labelsFile: "data/train-labels-idx1-ubyte")
 let labels = Tensor<Float>(oneHotAtIndices: numericLabels, depth: 10)
 
-
+var classifier = Classifier()
 let optimizer = RMSProp(for: classifier, learningRate: 0.001)
 
+// metrics stuff
 var losses: [Float] = []
 var accuracies: [Float] = []
-
-print("Starting Training")
 var step = 0
-var correctGuessCount = 0
-var totalGuessCount = 0
-var totalLoss: Float = 0
+
+// set phase
+Context.local.learningPhase = .training
+
 // The training loop.
-plt.ion()
-
-
-for epoch in 0..<epochCount {
-    
+for epoch in 1...epochCount {
+    var correctGuessCount = 0
+    var totalGuessCount = 0
+    var totalLoss: Float = 0
     for i in 0 ..< Int(labels.shape[0]) / batchSize {
         step += 1
-    // for i in 0 ..< 100 {
-        var x = minibatch(in: images, at: i)
-        x = x.reshaped(to: [batchSize, 28, 28, 1])
+        let x = minibatch(in: images, at: i)
         let y = minibatch(in: numericLabels, at: i)
         // Compute the gradient with respect to the model.
-        let grad_model = classifier.gradient { classifier -> Tensor<Float> in   
-            let ŷ = classifier.applied(to: x)
+        let 𝛁model = classifier.gradient { classifier -> Tensor<Float> in
+            let ŷ = classifier(x)
             let correctPredictions = ŷ.argmax(squeezingAxis: 1) .== y
             correctGuessCount += Int(Tensor<Int32>(correctPredictions).sum().scalarized())
             totalGuessCount += batchSize
@@ -118,9 +145,8 @@ for epoch in 0..<epochCount {
             totalLoss += loss.scalarized()
             return loss
         }
-
         // Update the model's differentiable variables along the gradient vector.
-        optimizer.update(&classifier.allDifferentiableVariables, along: grad_model)
+        optimizer.update(&classifier.allDifferentiableVariables, along: 𝛁model)
 
         // metrics
         if step % metric_steps == 0 {
@@ -154,8 +180,5 @@ for epoch in 0..<epochCount {
             totalGuessCount = 0
             totalLoss = 0
         }
-
     }
-    
-
 }
